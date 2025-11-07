@@ -1,133 +1,124 @@
 #!/usr/bin/env python3
 """
-Calculate scheduled Metro-North train travel times to Grand Central Terminal
-for a specific target arrival time and date.
+tt2gc.py
+---------
+Compute *real-time* Metro-North travel times to Grand Central Terminal
+using the public GTFS-Realtime feed (no API key required).
 
-Prompts user for:
-    - Target date (YYYY-MM-DD)
-    - Target arrival time at Grand Central (HH:MM, 24-hour)
+Requires:
+    pip install pandas requests protobuf gtfs-realtime-bindings pytz
 
-Output: metro_north_train_times_for_arrival.csv
+Usage:
+    python tt2gc.py
 """
 
 import requests
 import pandas as pd
-import io
-import zipfile
+from google.transit import gtfs_realtime_pb2
 from datetime import datetime
+import pytz
 
 # --- Constants ---
-GTFS_URL = "https://rrgtfsfeeds.s3.amazonaws.com/gtfsmnr.zip"
-DESTINATION_NAME = "Grand Central Terminal"
+# Public realtime GTFS feed (no key required)
+REALTIME_FEED_URL = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/mnr%2Fgtfs-mnr"
+
+# Grand Central Terminal stop identifiers usually contain "GCT"
+TARGET_DEST = "Grand Central Terminal"
 
 
-def to_minutes(t):
-    """Convert HH:MM:SS → minutes since midnight (handles 24h+ for overnight trips)."""
-    try:
-        h, m, s = map(int, t.split(":"))
-        return h * 60 + m + s / 60
-    except Exception:
-        return None
+# --- Step 1: Fetch realtime feed ---
+def fetch_realtime():
+    print("📡 Fetching Metro-North real-time feed (no API key)...")
+    r = requests.get(REALTIME_FEED_URL, timeout=20)
+    r.raise_for_status()
+    feed = gtfs_realtime_pb2.FeedMessage()
+    feed.ParseFromString(r.content)
+    print(f"✅ Loaded {len(feed.entity)} real-time entities.")
+    return feed
 
 
-# --- Step 1: User input ---
-target_date_str = input("Enter target date (YYYY-MM-DD): ").strip()
-target_time_str = input("Enter target arrival time at Grand Central (HH:MM, 24-hour): ").strip()
+# --- Step 2: Parse GTFS-RT into a structured DataFrame ---
+def parse_realtime(feed):
+    rows = []
+    for entity in feed.entity:
+        if entity.HasField("trip_update"):
+            trip = entity.trip_update.trip
+            route_id = trip.route_id
+            trip_id = trip.trip_id
+            breakpoint()
+            for stu in entity.trip_update.stop_time_update:
+                stop_id = stu.stop_id
+                arr = getattr(stu.arrival, "time", None)
+                dep = getattr(stu.departure, "time", None)
+                if arr or dep:
+                    rows.append({
+                        "trip_id": trip_id,
+                        "route_id": route_id,
+                        "stop_id": stop_id,
+                        "predicted_arrival": arr,
+                        "predicted_departure": dep
+                    })
+    df = pd.DataFrame(rows)
+    print(f"✅ Parsed {len(df)} realtime stop updates.")
+    return df
 
-target_date = datetime.strptime(target_date_str, "%Y-%m-%d")
-target_time = datetime.strptime(target_time_str, "%H:%M").time()
-target_arrival_min = target_time.hour * 60 + target_time.minute
-weekday = target_date.strftime("%A").lower()
 
-print(f"\nAnalyzing Metro-North schedules for trains arriving by {target_time_str} on {weekday.title()}...")
+# --- Step 3: Compute travel times to Grand Central ---
+def compute_travel_times(df):
+    if df.empty:
+        raise ValueError("No realtime data found!")
 
-# --- Step 2: Download GTFS feed ---
-r = requests.get(GTFS_URL)
-r.raise_for_status()
+    # Identify destination stop IDs
+    dest_ids = [sid for sid in df["stop_id"].unique() if TARGET_DEST in sid]
+    if not dest_ids:
+        raise ValueError(f"No stop_id containing '{TARGET_DEST}' found in feed.")
 
-with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-    stops = pd.read_csv(z.open("stops.txt"))
-    stop_times = pd.read_csv(z.open("stop_times.txt"))
-    trips = pd.read_csv(z.open("trips.txt"))
-    routes = pd.read_csv(z.open("routes.txt"))
-    calendar = pd.read_csv(z.open("calendar.txt"))
+    # Get arrival times at GCT for each trip
+    dests = df[df["stop_id"].isin(dest_ids)][["trip_id", "predicted_arrival"]]
+    dests = dests.rename(columns={"predicted_arrival": "arrival_GCT"})
 
-# --- Step 3: Filter for active services on target date ---
-calendar["start_date"] = pd.to_datetime(calendar["start_date"], format="%Y%m%d")
-calendar["end_date"] = pd.to_datetime(calendar["end_date"], format="%Y%m%d")
+    # Merge to compute live travel times for each upstream stop
+    merged = df.merge(dests, on="trip_id", how="inner")
+    merged = merged[merged["predicted_arrival"] < merged["arrival_GCT"]]
+    merged["travel_time_min"] = (merged["arrival_GCT"] - merged["predicted_arrival"]) / 60.0
 
-active_services = calendar[
-    (calendar["start_date"] <= target_date)
-    & (calendar["end_date"] >= target_date)
-    & (calendar[weekday] == 1)
-]["service_id"].unique()
+    # Convert UNIX timestamps to readable times (Eastern Time)
+    est = pytz.timezone("America/New_York")
+    merged["predicted_arrival"] = pd.to_datetime(merged["predicted_arrival"], unit="s", utc=True).dt.tz_convert(est)
+    merged["arrival_GCT"] = pd.to_datetime(merged["arrival_GCT"], unit="s", utc=True).dt.tz_convert(est)
 
-trips = trips[trips["service_id"].isin(active_services)]
+    # Simplify output
+    summary = (
+        merged.groupby(["stop_id", "route_id"], as_index=False)
+        .agg({
+            "predicted_arrival": "min",
+            "arrival_GCT": "min",
+            "travel_time_min": "min"
+        })
+        .sort_values("travel_time_min")
+        .reset_index(drop=True)
+    )
 
-# --- Step 4: Merge tables ---
-st = stop_times.merge(trips, on="trip_id", how="inner")
-st = st.merge(routes[["route_id", "route_long_name"]], on="route_id", how="left")
+    summary.rename(columns={
+        "stop_id": "Origin_Stop_ID",
+        "route_id": "Line",
+        "predicted_arrival": "Departure_Time",
+        "arrival_GCT": "Arrival_GCT",
+        "travel_time_min": "Live_Travel_Min"
+    }, inplace=True)
 
-# --- Step 5: Find Grand Central stop_id(s) ---
-dest_ids = stops.loc[
-    stops["stop_name"].str.contains(DESTINATION_NAME, case=False, na=False),
-    "stop_id"
-].unique()
+    print("✅ Computed live travel times successfully.")
+    return summary
 
-if len(dest_ids) == 0:
-    raise ValueError("Could not find Grand Central Terminal in stops.txt")
 
-# --- Step 6: Convert times ---
-st["arrival_min"] = st["arrival_time"].apply(to_minutes)
-st["departure_min"] = st["departure_time"].apply(to_minutes)
+# --- Step 4: Main Entry Point ---
+if __name__ == "__main__":
+    feed = fetch_realtime()
+    df = parse_realtime(feed)
+    results = compute_travel_times(df)
 
-# --- Step 7: Find trips that arrive at Grand Central before or at target time ---
-dest_trips = st[
-    (st["stop_id"].isin(dest_ids)) & (st["arrival_min"] <= target_arrival_min)
-][["trip_id", "arrival_min"]].rename(columns={"arrival_min": "dest_arrival_min"})
+    output_file = f"live_tt2gc_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+    results.to_csv(output_file, index=False)
 
-# --- Step 8: Join and compute travel times ---
-merged = st.merge(dest_trips, on="trip_id", how="inner")
-merged = merged[merged["arrival_min"] < merged["dest_arrival_min"]]
-merged["travel_time_min"] = merged["dest_arrival_min"] - merged["departure_min"]
-
-# --- Step 9: Select most recent trip before target arrival per station ---
-best = (
-    merged.sort_values("dest_arrival_min", ascending=False)
-    .groupby(["stop_id", "stop_name", "route_long_name"], as_index=False)
-    .first()
-)
-
-best = best[["stop_name", "route_long_name", "departure_min", "dest_arrival_min", "travel_time_min"]]
-
-# --- Step 10: Format for output ---
-best.rename(
-    columns={
-        "route_long_name": "Line",
-        "departure_min": "Departure_Min",
-        "dest_arrival_min": "Arrival_Min",
-        "travel_time_min": "Train_Travel_Min",
-    },
-    inplace=True,
-)
-
-best["Train_Travel_Min"] = best["Train_Travel_Min"].round(1)
-
-def fmt_time(m):
-    if pd.isna(m):
-        return ""
-    return f"{int(m//60):02d}:{int(m%60):02d}"
-
-best["Scheduled_Departure"] = best["Departure_Min"].apply(fmt_time)
-best["Scheduled_Arrival"] = best["Arrival_Min"].apply(fmt_time)
-
-# --- Step 11: Clean and sort ---
-best = best[~best["stop_name"].str.contains("Grand Central", case=False)]
-best = best.sort_values("Train_Travel_Min").reset_index(drop=True)
-
-# --- Step 12: Output ---
-print("\nClosest scheduled trains arriving by target time:")
-print(best[["stop_name", "Line", "Scheduled_Departure", "Scheduled_Arrival", "Train_Travel_Min"]].head(15))
-
-best.to_csv("metro_north_train_times_for_arrival.csv", index=False)
-print("\n✅ Saved to metro_north_train_times_for_arrival.csv")
+    print(f"\n📄 Results saved to {output_file}")
+    print(results.head(15))

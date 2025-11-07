@@ -33,7 +33,7 @@ end
 # Unset irrelevant variables.
 deactivate nondestructive
 
-set -gx VIRTUAL_ENV "/Users/plazos/Desktop/coding/MTAtimeOpt/venv"
+set -gx VIRTUAL_ENV "/Users/plazos/Desktop/coding/MTAtimeOpt/MTA-time-opt/venv"
 
 set -gx _OLD_VIRTUAL_PATH $PATH
 set -gx PATH "$VIRTUAL_ENV/bin" $PATH

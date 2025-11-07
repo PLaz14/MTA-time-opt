@@ -20,7 +20,7 @@ This tool determines which **station** gives you the **shortest total door-to-te
 
 ```
 .
-├── metro_north_train_times_for_arrival.py   # Builds schedule-based train times to GCT
+├── tt2gc.py                                # Builds schedule-based train times to GCT
 ├── optimal_combined_trip.py                 # Finds best total travel time (drive + train)
 ├── requirements.txt                         # Dependencies for Python 3.10
 └── README.md                                # Documentation
@@ -51,7 +51,7 @@ pip install -r requirements.txt
 Run this first to compute train travel times to Grand Central:
 
 ```bash
-python metro_north_train_times_for_arrival.py
+python tt2gc.py
 ```
 
 You’ll be prompted for:
