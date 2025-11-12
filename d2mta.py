@@ -5,7 +5,7 @@ import zipfile
 import time
 
 # --- Input ---
-origin_address = "123 Main St, White Plains, NY"  # Replace with your address
+origin_address = input("Enter origin address: ")  # Replace with your address
 
 # --- Helper: Geocode an address using Nominatim ---
 def geocode(address):
@@ -92,8 +92,8 @@ for i, row in stations.iterrows():
 df = pd.DataFrame(results).dropna()
 df = df.sort_values("Distance_mi").reset_index(drop=True)
 
-print("\nClosest 20 Metro-North stations:")
-print(df.head(20))
+print("\nClosest 10 Metro-North stations:")
+print(df.head(10))
 
 # Save all results
 df.to_csv("metro_north_full_station_distances.csv", index=False)
